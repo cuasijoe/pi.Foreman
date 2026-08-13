@@ -1,0 +1,33 @@
+{
+  "name": "foreman",
+  "version": "0.1.0",
+  "description": "Pi extension adding three subagent tools: explore, review, verify",
+  "type": "module",
+  "private": true,
+  "keywords": ["pi-package", "pi-extension", "subagents"],
+  "files": ["src", "README.md", "NOTES.md"],
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types test/offline.mjs",
+    "test:offline": "node --experimental-strip-types test/offline.mjs",
+    "test:model": "./test/acceptance.sh",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.{ts,mjs,cjs}\"",
+    "check": "prettier --check \"src/**/*.ts\" \"test/**/*.{ts,mjs,cjs}\" && tsc --noEmit",
+    "pack": "npm pack",
+    "build": "npm run check && npm test && npm pack"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0",
+    "prettier": "^3.3.3"
+  }
+}
