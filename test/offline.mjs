@@ -33,6 +33,7 @@ const tune = await import("../src/tune.ts");
 const config = await import("../src/config.ts");
 const state = await import("../src/state.ts");
 const render = await import("../src/render.ts");
+const runner = await import("../src/runner.ts");
 const spawn = await import("../src/spawn.ts");
 
 let pass = 0;
@@ -623,6 +624,16 @@ console.log("config");
 		assert.equal(cfg.explore.timeoutMs, 120000); // untouched default
 		assert.equal(cfg.verify.timeoutMs, 999);
 		assert.equal(cfg.review.maxTurns, 25);
+		assert.equal(cfg.progress, "line");
+	});
+
+	test("progress mode accepts only known values and respects config layers", () => {
+		const full = config.mergeConfig({ progress: "full" }, config.DEFAULT_CONFIG);
+		assert.equal(full.progress, "full");
+		assert.equal(config.mergeConfig({ progress: "off" }, full).progress, "off");
+		assert.equal(config.mergeConfig({ progress: "line" }, full).progress, "line");
+		assert.equal(config.mergeConfig({ progress: "verbose" }, full).progress, "full");
+		assert.equal(config.mergeConfig({ progress: null }, full).progress, "full");
 	});
 
 	test("explicitConfigKeys tracks only written fields", () => {
@@ -779,6 +790,72 @@ console.log("config");
 
 console.log("render");
 {
+	test("progress reporter: off suppresses updates; line shows latest truncated preview", () => {
+		const updates = [];
+		const base = { tool: "explore" };
+		assert.equal(
+			runner.createProgressReporter("off", (r) => updates.push(r), base),
+			undefined,
+		);
+		assert.equal(runner.createProgressReporter("line", undefined, base), undefined);
+		assert.deepEqual(updates, []);
+		const report = runner.createProgressReporter("line", (r) => updates.push(r), base);
+		report("→ waiting for child response");
+		report("→ read src/index.ts");
+		report("x".repeat(150) + "\nsecret");
+		assert.equal(updates.length, 3);
+		assert.equal(updates[1].details.progress, "→ read src/index.ts");
+		assert.equal(updates[1].content[0].text, updates[1].details.progress);
+		assert.equal(updates[2].details.progress, "x".repeat(120));
+	});
+	test("progress reporter: full keeps only the last eight lines per invocation", () => {
+		const updates = [];
+		const base = { tool: "review" };
+		const report = runner.createProgressReporter("full", (r) => updates.push(r), base);
+		for (let i = 0; i < 10; i++) report(`→ read file-${i}.ts`);
+		assert.equal(updates[0].details.progress, "→ read file-0.ts");
+		assert.deepEqual(
+			updates.at(-1).details.progress.split("\n"),
+			Array.from({ length: 8 }, (_, i) => `→ read file-${i + 2}.ts`),
+		);
+		const other = [];
+		runner.createProgressReporter("full", (r) => other.push(r), base)("→ bash $ git diff");
+		assert.equal(other[0].details.progress, "→ bash $ git diff");
+	});
+	test("renderResult shows the live feed, then the unchanged final answer", () => {
+		const theme = { fg: (_color, text) => text, bold: (text) => text };
+		const context = { isError: false };
+		const result = {
+			content: [{ type: "text", text: "Final answer" }],
+			details: {
+				tool: "explore",
+				progress: "→ read a.ts\n→ read b.ts",
+				turns: 1,
+				inputTokens: 0,
+				outputTokens: 0,
+				costUsd: 0,
+				stoppedBy: "complete",
+			},
+		};
+		const partial = render.renderResult(
+			result,
+			{ expanded: false, isPartial: true },
+			theme,
+			context,
+		);
+		assert.deepEqual(
+			partial.render(80).map((s) => s.trim()),
+			["→ read a.ts", "→ read b.ts"],
+		);
+		const final = render.renderResult(
+			result,
+			{ expanded: false, isPartial: false },
+			theme,
+			context,
+		);
+		assert.match(final.render(80).join("\n"), /Final answer/);
+		assert.doesNotMatch(final.render(80).join("\n"), /→ read/);
+	});
 	test("usageFooter: turns pluralization + token/cost/duration formatting", () => {
 		assert.equal(
 			render.usageFooter({

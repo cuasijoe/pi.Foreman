@@ -235,7 +235,7 @@ export default function (pi: ExtensionAPI) {
 			`  explore: ${fmtToolCfg(config.explore)}`,
 			`  review:  ${fmtToolCfg(config.review)}`,
 			`  verify:  ${fmtToolCfg(config.verify)}`,
-			`  maxReturnChars: ${config.maxReturnChars} · logging: ${config.logging} · disabled: [${config.disabled.join(", ")}]`,
+			`  progress: ${config.progress} · maxReturnChars: ${config.maxReturnChars} · logging: ${config.logging} · disabled: [${config.disabled.join(", ")}]`,
 			`  contextPressure: ${config.contextPressure.enabled ? `warn ≥${config.contextPressure.warnAt}% · strong ≥${config.contextPressure.strongAt}%` : "disabled"}`,
 			`  tune: ${config.tune.enabled ? "auto (enabled)" : "manual"} · minRuns ${config.tune.minRuns} · timeoutRate ${config.tune.timeoutRate} · maxTurnsRate ${config.tune.maxTurnsRate} · caps ${fmtDur(config.tune.maxTimeoutMs)}/${config.tune.maxMaxTurns} turns`,
 			"",

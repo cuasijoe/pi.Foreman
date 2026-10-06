@@ -47,10 +47,14 @@ export interface TierConfig {
 	strong?: string;
 }
 
+export type ProgressMode = "off" | "line" | "full";
+
 export interface ForemanConfig {
 	explore: ToolConfig;
 	review: ToolConfig;
 	verify: ToolConfig;
+	/** Live child activity shown in the tool row; only affects partial UI updates. */
+	progress: ProgressMode;
 	maxReturnChars: number;
 	logging: boolean;
 	disabled: string[];
@@ -63,6 +67,7 @@ export const DEFAULT_CONFIG: ForemanConfig = {
 	explore: { model: undefined, maxTurns: 15, timeoutMs: 120_000 },
 	review: { model: undefined, maxTurns: 25, timeoutMs: 300_000 },
 	verify: { model: undefined, maxTurns: 10, timeoutMs: 600_000 },
+	progress: "line",
 	maxReturnChars: 8000,
 	logging: true,
 	disabled: [],
@@ -182,6 +187,10 @@ export function mergeConfig(
 		explore: mergeToolConfig(raw.explore, base.explore),
 		review: mergeToolConfig(raw.review, base.review),
 		verify: mergeToolConfig(raw.verify, base.verify),
+		progress:
+			raw.progress === "off" || raw.progress === "line" || raw.progress === "full"
+				? raw.progress
+				: base.progress,
 		maxReturnChars:
 			typeof raw.maxReturnChars === "number" ? raw.maxReturnChars : base.maxReturnChars,
 		logging: typeof raw.logging === "boolean" ? raw.logging : base.logging,

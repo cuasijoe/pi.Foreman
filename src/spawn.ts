@@ -244,6 +244,9 @@ export async function spawn(opts: SpawnOptions): Promise<SpawnResult> {
 		}
 		if (!event || typeof event.type !== "string") return;
 
+		if (event.type === "turn_start") {
+			emitLine("→ waiting for child response");
+		}
 		if (event.type === "tool_execution_start" && event.toolName) {
 			emitLine(`→ ${formatToolCallLine(event.toolName, event.args)}`);
 		}

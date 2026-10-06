@@ -4,8 +4,8 @@
  * - renderCall: one line — tool name + the parameter that matters.
  * - renderResult: collapsed to a compact 1-2 line summary (first line of the
  *   answer + a usage footer); expanded shows the full answer as Markdown.
- * - Streaming: while a child runs, renderResult(isPartial) shows the latest
- *   activity line streamed from the child (tool calls, short output previews).
+ * - Streaming: while a child runs, renderResult(isPartial) shows the configured
+ *   activity view (latest line or bounded rolling feed).
  */
 
 import type {
@@ -139,8 +139,8 @@ export type RenderResultFn = (
 
 export const renderResult: RenderResultFn = (result, options, theme, context) => {
 	if (options.isPartial) {
-		const text = result.details?.progress ?? getResultText(result);
-		return new Text(theme.fg("dim", text.split("\n")[0].slice(0, 120)), 0, 0);
+		const text = result.details?.progress ?? getResultText(result).split("\n")[0].slice(0, 120);
+		return new Text(theme.fg("dim", text), 0, 0);
 	}
 
 	const details = result.details;

@@ -7,7 +7,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AgentToolResult, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
-import type { ForemanConfig, Tier, ToolConfig } from "./config.ts";
+import type { ForemanConfig, ProgressMode, Tier, ToolConfig } from "./config.ts";
 import { logDirPath, modelCliId, resolveToolModel } from "./config.ts";
 import { usageFooter, type ForemanToolDetails, type ToolKind } from "./render.ts";
 import { spawn, type BashMode, type SpawnResult } from "./spawn.ts";
@@ -34,6 +34,32 @@ export interface RunSubagentResult {
 	details: ForemanToolDetails;
 	usage: Usage;
 	isError: boolean;
+}
+
+const MAX_PROGRESS_LINES = 8;
+const MAX_PROGRESS_LINE_LENGTH = 120;
+
+/** One bounded activity feed per invocation; partial updates are never part of the final result. */
+export function createProgressReporter(
+	mode: ProgressMode,
+	onUpdate: RunSubagentOptions["onUpdate"],
+	base: ForemanToolDetails,
+): ((line: string) => void) | undefined {
+	if (mode === "off" || !onUpdate) return undefined;
+	const lines: string[] = [];
+	return (line) => {
+		const preview = line.split(/[\r\n]/, 1)[0].slice(0, MAX_PROGRESS_LINE_LENGTH);
+		if (!preview) return;
+		if (mode === "full") {
+			lines.push(preview);
+			if (lines.length > MAX_PROGRESS_LINES) lines.shift();
+		}
+		const progress = mode === "full" ? lines.join("\n") : preview;
+		onUpdate({
+			content: [{ type: "text", text: progress }],
+			details: { ...base, progress },
+		});
+	};
 }
 
 function buildUsage(r: SpawnResult): Usage {
@@ -95,6 +121,9 @@ export async function runSubagent(opts: RunSubagentOptions): Promise<RunSubagent
 		logPath: logPath || undefined,
 	};
 
+	const reportProgress = createProgressReporter(config.progress, opts.onUpdate, detailsBase);
+	reportProgress?.(`→ starting ${kind} agent`);
+
 	const r = await spawn({
 		systemPrompt: opts.systemPrompt,
 		toolNames: opts.toolNames,
@@ -103,12 +132,7 @@ export async function runSubagent(opts: RunSubagentOptions): Promise<RunSubagent
 		maxTurns: opts.toolConfig.maxTurns,
 		timeoutMs: opts.toolConfig.timeoutMs,
 		signal: opts.signal,
-		onUpdate: (line) => {
-			opts.onUpdate?.({
-				content: [{ type: "text", text: line }],
-				details: { ...detailsBase, progress: line },
-			});
-		},
+		onUpdate: reportProgress,
 		cwd: ctx.cwd,
 		bashMode: opts.bashMode,
 		explicitVerifyCommand: opts.explicitVerifyCommand ?? false,
