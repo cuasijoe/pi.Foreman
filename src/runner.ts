@@ -7,8 +7,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AgentToolResult, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
-import type { ForemanConfig, Tier, ToolConfig } from "./config.ts";
+import { ActivityTracker } from "./activity.ts";
+import type { ForemanConfig, ProgressMode, Tier, ToolConfig } from "./config.ts";
 import { logDirPath, modelCliId, resolveToolModel } from "./config.ts";
+import { livePanel } from "./live-panel.ts";
 import { usageFooter, type ForemanToolDetails, type ToolKind } from "./render.ts";
 import { spawn, type BashMode, type SpawnResult } from "./spawn.ts";
 import { recordRun, sessionTotal } from "./state.ts";
@@ -34,6 +36,32 @@ export interface RunSubagentResult {
 	details: ForemanToolDetails;
 	usage: Usage;
 	isError: boolean;
+}
+
+const MAX_PROGRESS_LINES = 8;
+const MAX_PROGRESS_LINE_LENGTH = 120;
+
+/** One bounded activity feed per invocation; partial updates are never part of the final result. */
+export function createProgressReporter(
+	mode: ProgressMode,
+	onUpdate: RunSubagentOptions["onUpdate"],
+	base: ForemanToolDetails,
+): ((line: string) => void) | undefined {
+	if (mode === "off" || !onUpdate) return undefined;
+	const lines: string[] = [];
+	return (line) => {
+		const preview = line.split(/[\r\n]/, 1)[0].slice(0, MAX_PROGRESS_LINE_LENGTH);
+		if (!preview) return;
+		if (mode === "full") {
+			lines.push(preview);
+			if (lines.length > MAX_PROGRESS_LINES) lines.shift();
+		}
+		const progress = mode === "full" ? lines.join("\n") : preview;
+		onUpdate({
+			content: [{ type: "text", text: progress }],
+			details: { ...base, progress },
+		});
+	};
 }
 
 function buildUsage(r: SpawnResult): Usage {
@@ -93,29 +121,66 @@ export async function runSubagent(opts: RunSubagentOptions): Promise<RunSubagent
 		model: resolved.model ? resolved.model.id : undefined,
 		provider: resolved.model ? resolved.model.provider : undefined,
 		logPath: logPath || undefined,
+		progressMode: config.progress,
 	};
 
-	const r = await spawn({
-		systemPrompt: opts.systemPrompt,
-		toolNames: opts.toolNames,
-		prompt: opts.prompt,
-		modelCliId: modelCliId(resolved.model),
-		maxTurns: opts.toolConfig.maxTurns,
-		timeoutMs: opts.toolConfig.timeoutMs,
-		signal: opts.signal,
-		onUpdate: (line) => {
-			opts.onUpdate?.({
-				content: [{ type: "text", text: line }],
-				details: { ...detailsBase, progress: line },
-			});
-		},
-		cwd: ctx.cwd,
-		bashMode: opts.bashMode,
-		explicitVerifyCommand: opts.explicitVerifyCommand ?? false,
-		maxReturnChars: config.maxReturnChars,
-		logPath: logPath || undefined,
-		promptVersion,
-	});
+	const tracker = config.progress !== "off" && opts.onUpdate ? new ActivityTracker() : undefined;
+	let latestPartial: AgentToolResult<ForemanToolDetails> | undefined;
+	const forward = (partial: AgentToolResult<ForemanToolDetails>) => {
+		latestPartial = partial;
+		opts.onUpdate?.({
+			...partial,
+			details: { ...partial.details, activity: tracker?.snapshot() },
+		});
+	};
+	const refresh = () => {
+		if (latestPartial && tracker) forward(latestPartial);
+	};
+	const reportProgress = createProgressReporter(config.progress, forward, detailsBase);
+	tracker?.record(`→ starting ${kind} agent`);
+	reportProgress?.(`→ starting ${kind} agent`);
+	const panel =
+		config.livePanel && ctx.mode === "tui"
+			? livePanel.start(ctx.ui, kind, modelCliId(resolved.model) ?? "default model")
+			: undefined;
+
+	const timer = tracker ? setInterval(refresh, 1000) : undefined;
+	timer?.unref?.();
+	let lastStreamUpdate = 0;
+	let r: SpawnResult;
+	try {
+		r = await spawn({
+			systemPrompt: opts.systemPrompt,
+			toolNames: opts.toolNames,
+			prompt: opts.prompt,
+			modelCliId: modelCliId(resolved.model),
+			maxTurns: opts.toolConfig.maxTurns,
+			timeoutMs: opts.toolConfig.timeoutMs,
+			signal: opts.signal,
+			onUpdate: (line) => {
+				tracker?.record(line);
+				reportProgress?.(line);
+			},
+			onActivity: (activity) => {
+				tracker?.observe(activity);
+				panel?.update(activity);
+				const now = Date.now();
+				if (tracker && (!activity.textDelta || now - lastStreamUpdate >= 250)) {
+					lastStreamUpdate = now;
+					refresh();
+				}
+			},
+			cwd: ctx.cwd,
+			bashMode: opts.bashMode,
+			explicitVerifyCommand: opts.explicitVerifyCommand ?? false,
+			maxReturnChars: config.maxReturnChars,
+			logPath: logPath || undefined,
+			promptVersion,
+		});
+	} finally {
+		if (timer) clearInterval(timer);
+		panel?.end();
+	}
 
 	const outcome = deriveOutcome({
 		stoppedBy: r.stoppedBy,
@@ -139,6 +204,7 @@ export async function runSubagent(opts: RunSubagentOptions): Promise<RunSubagent
 		provider: r.provider ?? detailsBase.provider,
 		error: r.error,
 		logPath: logPath || undefined,
+		activity: tracker?.snapshot(),
 	};
 
 	// Telemetry: one JSONL line per run, survives restarts. Appended after

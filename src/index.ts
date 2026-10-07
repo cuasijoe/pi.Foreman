@@ -21,6 +21,7 @@ import {
 	logDirPath,
 	tuningPath,
 } from "./config.ts";
+import { livePanel } from "./live-panel.ts";
 import type { ToolKind } from "./render.ts";
 import { resetSessionSpend, sessionSpend, sessionTotal } from "./state.ts";
 import { buildStats, markRetried, median, readTelemetry, telemetryPath } from "./telemetry.ts";
@@ -83,6 +84,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", (_event, ctx) => {
+		livePanel.reset();
 		const trusted = ctx.isProjectTrusted();
 		// Load global+project once; the tuning overlay is merged separately so a
 		// post-auto-tune refresh only re-reads tuning.json, not global/project.
@@ -135,6 +137,8 @@ export default function (pi: ExtensionAPI) {
 			pi.setActiveTools(pi.getActiveTools().filter((name) => !disabled.has(name)));
 		}
 	});
+
+	pi.on("session_shutdown", () => livePanel.reset());
 
 	// Retry signal: when the parent re-invokes a foreman tool later in the
 	// same session, the previous run of that tool was evidently not sufficient
@@ -233,9 +237,9 @@ export default function (pi: ExtensionAPI) {
 		return [
 			"foreman — resolved config",
 			`  explore: ${fmtToolCfg(config.explore)}`,
-			`  review:  ${fmtToolCfg(config.review)}`,
+			`  review:  ${fmtToolCfg(config.review)} · minSeverity:${config.review.minSeverity}`,
 			`  verify:  ${fmtToolCfg(config.verify)}`,
-			`  maxReturnChars: ${config.maxReturnChars} · logging: ${config.logging} · disabled: [${config.disabled.join(", ")}]`,
+			`  progress: ${config.progress} · livePanel: ${config.livePanel} · maxReturnChars: ${config.maxReturnChars} · logging: ${config.logging} · disabled: [${config.disabled.join(", ")}]`,
 			`  contextPressure: ${config.contextPressure.enabled ? `warn ≥${config.contextPressure.warnAt}% · strong ≥${config.contextPressure.strongAt}%` : "disabled"}`,
 			`  tune: ${config.tune.enabled ? "auto (enabled)" : "manual"} · minRuns ${config.tune.minRuns} · timeoutRate ${config.tune.timeoutRate} · maxTurnsRate ${config.tune.maxTurnsRate} · caps ${fmtDur(config.tune.maxTimeoutMs)}/${config.tune.maxMaxTurns} turns`,
 			"",

@@ -18,6 +18,13 @@ export interface ToolConfig {
 	timeoutMs: number;
 }
 
+export type ReviewSeverity = "low" | "medium" | "high";
+
+export interface ReviewConfig extends ToolConfig {
+	/** Minimum actionable finding severity returned to the parent. */
+	minSeverity: ReviewSeverity;
+}
+
 export interface ContextPressureConfig {
 	enabled: boolean;
 	/** Inject below this context percent. */
@@ -47,10 +54,16 @@ export interface TierConfig {
 	strong?: string;
 }
 
+export type ProgressMode = "off" | "line" | "full";
+
 export interface ForemanConfig {
 	explore: ToolConfig;
-	review: ToolConfig;
+	review: ReviewConfig;
 	verify: ToolConfig;
+	/** Live child activity shown in the tool row; only affects partial UI updates. */
+	progress: ProgressMode;
+	/** Show a non-modal live activity widget above the editor (TUI only). */
+	livePanel: boolean;
 	maxReturnChars: number;
 	logging: boolean;
 	disabled: string[];
@@ -61,8 +74,10 @@ export interface ForemanConfig {
 
 export const DEFAULT_CONFIG: ForemanConfig = {
 	explore: { model: undefined, maxTurns: 15, timeoutMs: 120_000 },
-	review: { model: undefined, maxTurns: 25, timeoutMs: 300_000 },
+	review: { model: undefined, maxTurns: 25, timeoutMs: 300_000, minSeverity: "low" },
 	verify: { model: undefined, maxTurns: 10, timeoutMs: 600_000 },
+	progress: "line",
+	livePanel: false,
 	maxReturnChars: 8000,
 	logging: true,
 	disabled: [],
@@ -141,6 +156,19 @@ function mergeToolConfig(over: unknown, base: ToolConfig): ToolConfig {
 	};
 }
 
+function mergeReviewConfig(over: unknown, base: ReviewConfig): ReviewConfig {
+	return {
+		...mergeToolConfig(over, base),
+		minSeverity:
+			isRecord(over) &&
+			(over.minSeverity === "low" ||
+				over.minSeverity === "medium" ||
+				over.minSeverity === "high")
+				? over.minSeverity
+				: base.minSeverity,
+	};
+}
+
 function mergeContextPressure(over: unknown, base: ContextPressureConfig): ContextPressureConfig {
 	if (over === false) return { ...base, enabled: false };
 	if (!isRecord(over)) return { ...base };
@@ -180,8 +208,13 @@ export function mergeConfig(
 	if (!raw) return { ...base };
 	return {
 		explore: mergeToolConfig(raw.explore, base.explore),
-		review: mergeToolConfig(raw.review, base.review),
+		review: mergeReviewConfig(raw.review, base.review),
 		verify: mergeToolConfig(raw.verify, base.verify),
+		progress:
+			raw.progress === "off" || raw.progress === "line" || raw.progress === "full"
+				? raw.progress
+				: base.progress,
+		livePanel: typeof raw.livePanel === "boolean" ? raw.livePanel : base.livePanel,
 		maxReturnChars:
 			typeof raw.maxReturnChars === "number" ? raw.maxReturnChars : base.maxReturnChars,
 		logging: typeof raw.logging === "boolean" ? raw.logging : base.logging,

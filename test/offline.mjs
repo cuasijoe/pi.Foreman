@@ -33,6 +33,10 @@ const tune = await import("../src/tune.ts");
 const config = await import("../src/config.ts");
 const state = await import("../src/state.ts");
 const render = await import("../src/render.ts");
+const { filterReviewFindings } = await import("../src/review-filter.ts");
+const { ActivityTracker } = await import("../src/activity.ts");
+const { LivePanel } = await import("../src/live-panel.ts");
+const runner = await import("../src/runner.ts");
 const spawn = await import("../src/spawn.ts");
 
 let pass = 0;
@@ -623,6 +627,41 @@ console.log("config");
 		assert.equal(cfg.explore.timeoutMs, 120000); // untouched default
 		assert.equal(cfg.verify.timeoutMs, 999);
 		assert.equal(cfg.review.maxTurns, 25);
+		assert.equal(cfg.review.minSeverity, "low");
+		assert.equal(cfg.progress, "line");
+		assert.equal(cfg.livePanel, false);
+	});
+
+	test("progress mode accepts only known values and respects config layers", () => {
+		const full = config.mergeConfig({ progress: "full" }, config.DEFAULT_CONFIG);
+		assert.equal(full.progress, "full");
+		assert.equal(config.mergeConfig({ progress: "off" }, full).progress, "off");
+		assert.equal(config.mergeConfig({ progress: "line" }, full).progress, "line");
+		assert.equal(config.mergeConfig({ progress: "verbose" }, full).progress, "full");
+		assert.equal(config.mergeConfig({ progress: null }, full).progress, "full");
+		assert.equal(config.mergeConfig({ livePanel: true }, full).livePanel, true);
+		assert.equal(config.mergeConfig({ livePanel: "yes" }, full).livePanel, false);
+	});
+
+	test("review severity threshold layers independently from turn/timeout tuning", () => {
+		const configured = config.mergeConfig(
+			{ review: { minSeverity: "medium", maxTurns: 35 } },
+			config.DEFAULT_CONFIG,
+		);
+		assert.equal(configured.review.minSeverity, "medium");
+		assert.equal(configured.review.maxTurns, 35);
+		assert.equal(
+			config.mergeConfig({ review: { timeoutMs: 900000 } }, configured).review.minSeverity,
+			"medium",
+		);
+		assert.equal(
+			config.mergeConfig({ review: { minSeverity: "high" } }, configured).review.minSeverity,
+			"high",
+		);
+		assert.equal(
+			config.mergeConfig({ review: { minSeverity: "none" } }, configured).review.minSeverity,
+			"medium",
+		);
 	});
 
 	test("explicitConfigKeys tracks only written fields", () => {
@@ -777,8 +816,193 @@ console.log("config");
 	});
 }
 
+console.log("review severity filter");
+{
+	const answer = (verdict, findings, notes = "none") =>
+		`VERDICT: ${verdict}\n\nFINDINGS:\n${findings}\n\nNOTES: ${notes}\n\n[review: 2 turns, $0.01]`;
+	test("low threshold preserves the answer exactly", () => {
+		const text = answer("fix-first", "- [low] src/a.ts:1 — minor defect");
+		assert.equal(filterReviewFindings(text, "low"), text);
+	});
+	test("medium suppresses low, retains medium/high and the footer", () => {
+		const text = answer(
+			"fix-first",
+			[
+				"- [low] src/a.ts:1 — minor defect",
+				"- [medium] src/b.ts:2 — broken behavior",
+				"- [high] src/c.ts:3 — data loss",
+			].join("\n"),
+		);
+		const filtered = filterReviewFindings(text, "medium");
+		assert.doesNotMatch(filtered, /minor defect/);
+		assert.match(filtered, /\[medium\].*broken behavior/);
+		assert.match(filtered, /\[high\].*data loss/);
+		assert.match(filtered, /VERDICT: fix-first/);
+		assert.match(filtered, /\[review: 2 turns/);
+	});
+	test("high suppresses low/medium and changes an all-filtered fix-first to ship", () => {
+		const text = answer(
+			"fix-first",
+			[
+				"- [low] src/a.ts:1 — low issue",
+				"  detail of low issue",
+				"- [medium] src/b.ts:2 — medium issue",
+			].join("\n"),
+		);
+		const filtered = filterReviewFindings(text, "high");
+		assert.match(filtered, /^VERDICT: ship/m);
+		assert.match(filtered, /FINDINGS:\nNOTES: none/);
+		assert.doesNotMatch(filtered, /low issue|medium issue|detail of low issue/);
+	});
+	test("threshold preserves a high finding and its continuation while removing low", () => {
+		const text = answer(
+			"needs-discussion",
+			[
+				"- [high] src/c.ts:3 — data loss",
+				"  affects current callers",
+				"- [low] src/d.ts:4 — minor",
+				"  continuation of minor",
+			].join("\n"),
+		);
+		const filtered = filterReviewFindings(text, "medium");
+		assert.match(filtered, /affects current callers/);
+		assert.doesNotMatch(filtered, /continuation of minor|\[low\]/);
+		assert.match(filtered, /VERDICT: needs-discussion/);
+	});
+	test("malformed or truncated reviews remain untouched", () => {
+		for (const text of [
+			"VERDICT: fix-first\nFINDINGS:\n- [low] src/a.ts:1 — minor",
+			answer("fix-first", "- unknown finding\n- [low] src/a.ts:1 — minor"),
+		])
+			assert.equal(filterReviewFindings(text, "medium"), text);
+	});
+}
+
 console.log("render");
 {
+	test("progress reporter: off suppresses updates; line shows latest truncated preview", () => {
+		const updates = [];
+		const base = { tool: "explore" };
+		assert.equal(
+			runner.createProgressReporter("off", (r) => updates.push(r), base),
+			undefined,
+		);
+		assert.equal(runner.createProgressReporter("line", undefined, base), undefined);
+		assert.deepEqual(updates, []);
+		const report = runner.createProgressReporter("line", (r) => updates.push(r), base);
+		report("→ waiting for child response");
+		report("→ read src/index.ts");
+		report("x".repeat(150) + "\nsecret");
+		assert.equal(updates.length, 3);
+		assert.equal(updates[1].details.progress, "→ read src/index.ts");
+		assert.equal(updates[1].content[0].text, updates[1].details.progress);
+		assert.equal(updates[2].details.progress, "x".repeat(120));
+	});
+	test("progress reporter: full keeps only the last eight lines per invocation", () => {
+		const updates = [];
+		const base = { tool: "review" };
+		const report = runner.createProgressReporter("full", (r) => updates.push(r), base);
+		for (let i = 0; i < 10; i++) report(`→ read file-${i}.ts`);
+		assert.equal(updates[0].details.progress, "→ read file-0.ts");
+		assert.deepEqual(
+			updates.at(-1).details.progress.split("\n"),
+			Array.from({ length: 8 }, (_, i) => `→ read file-${i + 2}.ts`),
+		);
+		const other = [];
+		runner.createProgressReporter("full", (r) => other.push(r), base)("→ bash $ git diff");
+		assert.equal(other[0].details.progress, "→ bash $ git diff");
+	});
+	test("renderResult shows the live feed, then the unchanged final answer", () => {
+		const theme = { fg: (_color, text) => text, bold: (text) => text };
+		const context = { isError: false };
+		const result = {
+			content: [{ type: "text", text: "Final answer" }],
+			details: {
+				tool: "explore",
+				progress: "→ read a.ts\n→ read b.ts",
+				turns: 1,
+				inputTokens: 0,
+				outputTokens: 0,
+				costUsd: 0,
+				stoppedBy: "complete",
+			},
+		};
+		const partial = render.renderResult(
+			result,
+			{ expanded: false, isPartial: true },
+			theme,
+			context,
+		);
+		assert.deepEqual(
+			partial.render(80).map((s) => s.trim()),
+			["→ read a.ts", "→ read b.ts"],
+		);
+		const final = render.renderResult(
+			result,
+			{ expanded: false, isPartial: false },
+			theme,
+			context,
+		);
+		assert.match(final.render(80).join("\n"), /Final answer/);
+		assert.doesNotMatch(final.render(80).join("\n"), /→ read/);
+	});
+	test("inline activity uses compact and expanded timelines without changing the final answer", () => {
+		const theme = { fg: (_color, text) => text, bold: (text) => text };
+		const context = { isError: false };
+		const activity = {
+			elapsedMs: 21000,
+			lastEventAgoMs: 8000,
+			phase: "Waiting for model",
+			lastAction: "read src/render.ts",
+			entries: [{ atMs: 12000, text: "read src/render.ts" }],
+		};
+		const result = {
+			content: [{ type: "text", text: "Final answer" }],
+			details: {
+				tool: "explore",
+				activity,
+				progressMode: "line",
+				turns: 1,
+				inputTokens: 0,
+				outputTokens: 0,
+				costUsd: 0,
+				stoppedBy: "complete",
+			},
+		};
+		const compact = render
+			.renderResult(result, { expanded: false, isPartial: true }, theme, context)
+			.render(120)
+			.join("\n");
+		assert.match(compact, /Waiting for model · 21s elapsed · last event 8s ago/);
+		assert.match(compact, /Last: read src\/render.ts/);
+		assert.doesNotMatch(compact, /12s  read/);
+		const expanded = render
+			.renderResult(result, { expanded: true, isPartial: true }, theme, context)
+			.render(120)
+			.join("\n");
+		assert.match(expanded, /12s  read src\/render.ts/);
+		result.details.progressMode = "full";
+		assert.match(
+			render
+				.renderResult(result, { expanded: false, isPartial: true }, theme, context)
+				.render(120)
+				.join("\n"),
+			/12s  read/,
+		);
+		const final = render
+			.renderResult(result, { expanded: false, isPartial: false }, theme, context)
+			.render(120)
+			.join("\n");
+		assert.match(final, /Final answer/);
+		assert.doesNotMatch(final, /read src\/render.ts/);
+		const expandedFinal = render
+			.renderResult(result, { expanded: true, isPartial: false }, theme, context)
+			.render(120)
+			.join("\n");
+		assert.match(expandedFinal, /Final answer/);
+		assert.match(expandedFinal, /Recent activity:/);
+		assert.match(expandedFinal, /read src\/render.ts/);
+	});
 	test("usageFooter: turns pluralization + token/cost/duration formatting", () => {
 		assert.equal(
 			render.usageFooter({
@@ -879,6 +1103,73 @@ console.log("state spend registry");
 	});
 }
 
+console.log("activity tracker");
+{
+	test("bounded timeline retains recent events, draft preview, and honest idle time", () => {
+		let now = 0;
+		const tracker = new ActivityTracker(() => now);
+		tracker.observe({ phase: "waiting" });
+		tracker.record("→ waiting for child response");
+		now = 4000;
+		tracker.observe({ phase: "running_tool", action: "read src/config.ts" });
+		tracker.record("→ read src/config.ts");
+		tracker.record("first line of result");
+		now = 9000;
+		tracker.observe({ phase: "reasoning" });
+		tracker.observe({ phase: "responding", textDelta: "Hello " });
+		tracker.observe({ phase: "responding", textDelta: "world" });
+		assert.match(tracker.snapshot().entries.at(-1).text, /Hello world/);
+		assert.equal(tracker.snapshot(21000).lastEventAgoMs, 12000);
+		assert.equal(tracker.snapshot(21000).lastAction, "read src/config.ts");
+		for (let i = 0; i < 30; i++) tracker.record(`event-${i}`);
+		assert.equal(tracker.snapshot().entries.length, 24);
+		assert.equal(tracker.snapshot().entries.at(-1).text, "event-29");
+	});
+}
+
+console.log("live panel");
+{
+	test("non-modal widget tracks concurrent agents and clears when the last ends", () => {
+		let now = 1000;
+		const calls = [];
+		const ui = { setWidget: (...args) => calls.push(args) };
+		const panel = new LivePanel(() => now);
+		const explore = panel.start(ui, "explore", "deepseek/deepseek-v4-pro");
+		explore.update({ phase: "waiting" });
+		assert.deepEqual(calls, []); // Single agent belongs in its tool row.
+		now = 6000;
+		const review = panel.start(ui, "review", "anthropic/opus");
+		review.update({ phase: "running_tool", action: "bash $ git diff" });
+		assert.equal(calls.at(-1)[0], "foreman-live");
+		assert.deepEqual(calls.at(-1)[2], { placement: "aboveEditor" });
+		assert.match(calls.at(-1)[1].join("\n"), /2 agents running/);
+		assert.match(calls.at(-1)[1].join("\n"), /explore  0:05  ·  Waiting for model/);
+		assert.match(calls.at(-1)[1].join("\n"), /review.*Running tool/);
+		assert.match(calls.at(-1)[1].join("\n"), /bash \$ git diff/);
+		explore.end();
+		assert.deepEqual(calls.at(-1), ["foreman-live", undefined]);
+		const cleared = calls.length;
+		review.end();
+		assert.equal(calls.length, cleared);
+	});
+	test("panel sanitizes tool arguments, bounds rows, and ignores updates after reset", () => {
+		const calls = [];
+		const ui = { setWidget: (...args) => calls.push(args) };
+		const panel = new LivePanel(() => 0);
+		const agents = Array.from({ length: 5 }, () => panel.start(ui, "explore", "model"));
+		agents[0].update({ phase: "running_tool", action: "read secret\n\x1b[31mcolored" });
+		const lines = calls.at(-1)[1];
+		assert.ok(lines.length <= 10);
+		assert.match(lines.join("\n"), /\+2 more running/);
+		assert.doesNotMatch(lines.join("\n"), /\x1b|\n\[31m/);
+		panel.reset();
+		const after = calls.length;
+		agents[0].update({ phase: "responding" });
+		agents.forEach((agent) => agent.end());
+		assert.equal(calls.length, after);
+	});
+}
+
 console.log("spawn helpers");
 {
 	test("truncateReturn: passthrough, truncation, UTF-8 boundary", () => {
@@ -912,6 +1203,40 @@ console.log("spawn helpers");
 		assert.equal(spawn.formatToolCallLine("bash", { command: "npm test" }), "bash $ npm test");
 		assert.equal(spawn.formatToolCallLine("read", { path: "src/a.ts" }), "read src/a.ts");
 		assert.ok(spawn.formatToolCallLine("other", { x: 1 }).startsWith("other "));
+	});
+	test("child JSON events yield only phase metadata and tool calls", () => {
+		assert.deepEqual(spawn.activityFromEvent({ type: "turn_start" }), { phase: "waiting" });
+		assert.deepEqual(
+			spawn.activityFromEvent({
+				type: "message_update",
+				assistantMessageEvent: { type: "thinking_delta", delta: "private thoughts" },
+			}),
+			{ phase: "reasoning" },
+		);
+		assert.deepEqual(
+			spawn.activityFromEvent({
+				type: "message_update",
+				assistantMessageEvent: { type: "text_delta", delta: "draft answer" },
+			}),
+			{ phase: "responding", textDelta: "draft answer" },
+		);
+		assert.deepEqual(
+			spawn.activityFromEvent({
+				type: "tool_execution_start",
+				toolName: "read",
+				args: { path: "src/config.ts" },
+			}),
+			{ phase: "running_tool", action: "read src/config.ts" },
+		);
+		assert.deepEqual(
+			spawn.activityFromEvent({
+				type: "tool_execution_end",
+				toolName: "bash",
+				isError: true,
+			}),
+			{ phase: "tool_failed" },
+		);
+		assert.equal(spawn.activityFromEvent({ type: "message_end" }), undefined);
 	});
 }
 

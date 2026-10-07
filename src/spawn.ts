@@ -18,7 +18,9 @@ import { spawn as childSpawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
+import type { ChildActivity } from "./live-panel.ts";
 import { checkFormatCompliance } from "./telemetry.ts";
 
 export type BashMode = "explore" | "review" | "verify";
@@ -37,6 +39,8 @@ export interface SpawnOptions {
 	signal?: AbortSignal;
 	/** Stream child activity lines to the TUI (never into the parent's message array). */
 	onUpdate?: (line: string) => void;
+	/** Observable child phase for the optional live widget; never raw reasoning. */
+	onActivity?: (activity: ChildActivity) => void;
 	cwd: string;
 	bashMode: BashMode;
 	/** If the parent passed an explicit one-shot verify command. */
@@ -139,6 +143,42 @@ export function formatToolCallLine(toolName: string, args: unknown): string {
 	}
 }
 
+export function activityFromEvent(event: {
+	type: string;
+	assistantMessageEvent?: { type: string; toolName?: string; delta?: string };
+	toolName?: string;
+	args?: unknown;
+	isError?: boolean;
+}): ChildActivity | undefined {
+	if (event.type === "turn_start") return { phase: "waiting" };
+	if (event.type === "message_update") {
+		switch (event.assistantMessageEvent?.type) {
+			case "thinking_start":
+			case "thinking_delta":
+				return { phase: "reasoning" };
+			case "text_start":
+				return { phase: "responding" };
+			case "text_delta":
+				return {
+					phase: "responding",
+					textDelta: event.assistantMessageEvent?.delta ?? "",
+				};
+			case "toolcall_start":
+				return {
+					phase: "preparing_tool",
+					action: `Preparing ${event.assistantMessageEvent?.toolName ?? "tool"} call`,
+				};
+		}
+	}
+	if (event.type === "tool_execution_start" && event.toolName) {
+		return { phase: "running_tool", action: formatToolCallLine(event.toolName, event.args) };
+	}
+	if (event.type === "tool_execution_end" && event.toolName) {
+		return { phase: event.isError ? "tool_failed" : "tool_finished" };
+	}
+	return undefined;
+}
+
 export function truncateReturn(text: string, max: number): string {
 	if (max <= 0) return text;
 	const buf = Buffer.from(text, "utf8");
@@ -233,6 +273,17 @@ export async function spawn(opts: SpawnOptions): Promise<SpawnResult> {
 	const emitLine = (line: string) => {
 		opts.onUpdate?.(line);
 	};
+	let lastActivity: ChildActivity | undefined;
+	const emitActivity = (activity: ChildActivity) => {
+		if (
+			!activity.textDelta &&
+			activity.phase === lastActivity?.phase &&
+			activity.action === lastActivity.action
+		)
+			return;
+		lastActivity = activity;
+		opts.onActivity?.(activity);
+	};
 
 	const processLine = (line: string) => {
 		if (!line.trim()) return;
@@ -244,6 +295,9 @@ export async function spawn(opts: SpawnOptions): Promise<SpawnResult> {
 		}
 		if (!event || typeof event.type !== "string") return;
 
+		const activity = activityFromEvent(event);
+		if (activity) emitActivity(activity);
+		if (event.type === "turn_start") emitLine("→ waiting for child response");
 		if (event.type === "tool_execution_start" && event.toolName) {
 			emitLine(`→ ${formatToolCallLine(event.toolName, event.args)}`);
 		}
@@ -345,8 +399,9 @@ export async function spawn(opts: SpawnOptions): Promise<SpawnResult> {
 		proc = child;
 
 		let buffer = "";
+		const decoder = new StringDecoder("utf8");
 		child.stdout!.on("data", (data) => {
-			buffer += data.toString();
+			buffer += decoder.write(data);
 			const lines = buffer.split("\n");
 			buffer = lines.pop() ?? "";
 			for (const line of lines) processLine(line);
@@ -398,6 +453,7 @@ export async function spawn(opts: SpawnOptions): Promise<SpawnResult> {
 
 		const exitCode = await new Promise<number>((resolve) => {
 			child.on("close", (code) => {
+				buffer += decoder.end();
 				if (buffer.trim()) processLine(buffer);
 				clearTimeout(timer);
 				clearTimeout(killTimer);
