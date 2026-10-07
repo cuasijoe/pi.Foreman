@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { makeRenderCall, renderResult, type ForemanToolDetails } from "../render.ts";
+import { filterReviewFindings } from "../review-filter.ts";
 import { runSubagent } from "../runner.ts";
 
 const SYSTEM_PROMPT = fs.readFileSync(
@@ -98,6 +99,11 @@ export default function registerReview(
 			}
 
 			const config = deps.getConfig(ctx);
+			const minSeverity = config.review.minSeverity;
+			const systemPrompt =
+				minSeverity === "low"
+					? SYSTEM_PROMPT
+					: `${SYSTEM_PROMPT}\n\nMinimum finding severity: ${minSeverity}. Omit all lower-severity findings entirely, including from NOTES. If none remain, return VERDICT: ship and an empty FINDINGS section.`;
 			const prompt = [
 				`The change under review was meant to accomplish:\n\n${params.intent}`,
 				`Diff to read: ${params.diffSpec || "unstaged + staged changes vs HEAD (git diff, plus git diff --staged)"}`,
@@ -113,7 +119,7 @@ export default function registerReview(
 				toolConfig: config.review,
 				tier: "strong",
 				bashMode: "review",
-				systemPrompt: SYSTEM_PROMPT,
+				systemPrompt,
 				prompt,
 				toolNames: ["read", "bash"],
 				signal,
@@ -122,7 +128,9 @@ export default function registerReview(
 			});
 
 			return {
-				content: [{ type: "text", text: result.content }],
+				content: [
+					{ type: "text", text: filterReviewFindings(result.content, minSeverity) },
+				],
 				details: result.details as ForemanToolDetails,
 				usage: result.usage,
 			};

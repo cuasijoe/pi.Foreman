@@ -33,6 +33,7 @@ const tune = await import("../src/tune.ts");
 const config = await import("../src/config.ts");
 const state = await import("../src/state.ts");
 const render = await import("../src/render.ts");
+const { filterReviewFindings } = await import("../src/review-filter.ts");
 const { ActivityTracker } = await import("../src/activity.ts");
 const { LivePanel } = await import("../src/live-panel.ts");
 const runner = await import("../src/runner.ts");
@@ -626,6 +627,7 @@ console.log("config");
 		assert.equal(cfg.explore.timeoutMs, 120000); // untouched default
 		assert.equal(cfg.verify.timeoutMs, 999);
 		assert.equal(cfg.review.maxTurns, 25);
+		assert.equal(cfg.review.minSeverity, "low");
 		assert.equal(cfg.progress, "line");
 		assert.equal(cfg.livePanel, false);
 	});
@@ -639,6 +641,27 @@ console.log("config");
 		assert.equal(config.mergeConfig({ progress: null }, full).progress, "full");
 		assert.equal(config.mergeConfig({ livePanel: true }, full).livePanel, true);
 		assert.equal(config.mergeConfig({ livePanel: "yes" }, full).livePanel, false);
+	});
+
+	test("review severity threshold layers independently from turn/timeout tuning", () => {
+		const configured = config.mergeConfig(
+			{ review: { minSeverity: "medium", maxTurns: 35 } },
+			config.DEFAULT_CONFIG,
+		);
+		assert.equal(configured.review.minSeverity, "medium");
+		assert.equal(configured.review.maxTurns, 35);
+		assert.equal(
+			config.mergeConfig({ review: { timeoutMs: 900000 } }, configured).review.minSeverity,
+			"medium",
+		);
+		assert.equal(
+			config.mergeConfig({ review: { minSeverity: "high" } }, configured).review.minSeverity,
+			"high",
+		);
+		assert.equal(
+			config.mergeConfig({ review: { minSeverity: "none" } }, configured).review.minSeverity,
+			"medium",
+		);
 	});
 
 	test("explicitConfigKeys tracks only written fields", () => {
@@ -790,6 +813,68 @@ console.log("config");
 		);
 		assert.equal(withoutParent.model, undefined);
 		assert.ok(withoutParent.notice.includes("child will use its default"));
+	});
+}
+
+console.log("review severity filter");
+{
+	const answer = (verdict, findings, notes = "none") =>
+		`VERDICT: ${verdict}\n\nFINDINGS:\n${findings}\n\nNOTES: ${notes}\n\n[review: 2 turns, $0.01]`;
+	test("low threshold preserves the answer exactly", () => {
+		const text = answer("fix-first", "- [low] src/a.ts:1 — minor defect");
+		assert.equal(filterReviewFindings(text, "low"), text);
+	});
+	test("medium suppresses low, retains medium/high and the footer", () => {
+		const text = answer(
+			"fix-first",
+			[
+				"- [low] src/a.ts:1 — minor defect",
+				"- [medium] src/b.ts:2 — broken behavior",
+				"- [high] src/c.ts:3 — data loss",
+			].join("\n"),
+		);
+		const filtered = filterReviewFindings(text, "medium");
+		assert.doesNotMatch(filtered, /minor defect/);
+		assert.match(filtered, /\[medium\].*broken behavior/);
+		assert.match(filtered, /\[high\].*data loss/);
+		assert.match(filtered, /VERDICT: fix-first/);
+		assert.match(filtered, /\[review: 2 turns/);
+	});
+	test("high suppresses low/medium and changes an all-filtered fix-first to ship", () => {
+		const text = answer(
+			"fix-first",
+			[
+				"- [low] src/a.ts:1 — low issue",
+				"  detail of low issue",
+				"- [medium] src/b.ts:2 — medium issue",
+			].join("\n"),
+		);
+		const filtered = filterReviewFindings(text, "high");
+		assert.match(filtered, /^VERDICT: ship/m);
+		assert.match(filtered, /FINDINGS:\nNOTES: none/);
+		assert.doesNotMatch(filtered, /low issue|medium issue|detail of low issue/);
+	});
+	test("threshold preserves a high finding and its continuation while removing low", () => {
+		const text = answer(
+			"needs-discussion",
+			[
+				"- [high] src/c.ts:3 — data loss",
+				"  affects current callers",
+				"- [low] src/d.ts:4 — minor",
+				"  continuation of minor",
+			].join("\n"),
+		);
+		const filtered = filterReviewFindings(text, "medium");
+		assert.match(filtered, /affects current callers/);
+		assert.doesNotMatch(filtered, /continuation of minor|\[low\]/);
+		assert.match(filtered, /VERDICT: needs-discussion/);
+	});
+	test("malformed or truncated reviews remain untouched", () => {
+		for (const text of [
+			"VERDICT: fix-first\nFINDINGS:\n- [low] src/a.ts:1 — minor",
+			answer("fix-first", "- unknown finding\n- [low] src/a.ts:1 — minor"),
+		])
+			assert.equal(filterReviewFindings(text, "medium"), text);
 	});
 }
 

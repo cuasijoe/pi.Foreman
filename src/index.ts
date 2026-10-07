@@ -237,7 +237,7 @@ export default function (pi: ExtensionAPI) {
 		return [
 			"foreman — resolved config",
 			`  explore: ${fmtToolCfg(config.explore)}`,
-			`  review:  ${fmtToolCfg(config.review)}`,
+			`  review:  ${fmtToolCfg(config.review)} · minSeverity:${config.review.minSeverity}`,
 			`  verify:  ${fmtToolCfg(config.verify)}`,
 			`  progress: ${config.progress} · livePanel: ${config.livePanel} · maxReturnChars: ${config.maxReturnChars} · logging: ${config.logging} · disabled: [${config.disabled.join(", ")}]`,
 			`  contextPressure: ${config.contextPressure.enabled ? `warn ≥${config.contextPressure.warnAt}% · strong ≥${config.contextPressure.strongAt}%` : "disabled"}`,
