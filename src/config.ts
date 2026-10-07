@@ -55,6 +55,8 @@ export interface ForemanConfig {
 	verify: ToolConfig;
 	/** Live child activity shown in the tool row; only affects partial UI updates. */
 	progress: ProgressMode;
+	/** Show a non-modal live activity widget above the editor (TUI only). */
+	livePanel: boolean;
 	maxReturnChars: number;
 	logging: boolean;
 	disabled: string[];
@@ -68,6 +70,7 @@ export const DEFAULT_CONFIG: ForemanConfig = {
 	review: { model: undefined, maxTurns: 25, timeoutMs: 300_000 },
 	verify: { model: undefined, maxTurns: 10, timeoutMs: 600_000 },
 	progress: "line",
+	livePanel: false,
 	maxReturnChars: 8000,
 	logging: true,
 	disabled: [],
@@ -191,6 +194,7 @@ export function mergeConfig(
 			raw.progress === "off" || raw.progress === "line" || raw.progress === "full"
 				? raw.progress
 				: base.progress,
+		livePanel: typeof raw.livePanel === "boolean" ? raw.livePanel : base.livePanel,
 		maxReturnChars:
 			typeof raw.maxReturnChars === "number" ? raw.maxReturnChars : base.maxReturnChars,
 		logging: typeof raw.logging === "boolean" ? raw.logging : base.logging,

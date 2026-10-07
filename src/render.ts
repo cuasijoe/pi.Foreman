@@ -16,6 +16,8 @@ import type {
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { Container, Markdown, Text } from "@earendil-works/pi-tui";
+import type { ActivitySnapshot } from "./activity.ts";
+import type { ProgressMode } from "./config.ts";
 
 export type ToolKind = "explore" | "review" | "verify";
 
@@ -36,6 +38,9 @@ export interface ForemanToolDetails {
 	logPath?: string;
 	/** Latest activity line while streaming. */
 	progress?: string;
+	/** Bounded visible activity history, never sent to the parent model. */
+	activity?: ActivitySnapshot;
+	progressMode?: ProgressMode;
 }
 
 function formatTokens(count: number): string {
@@ -137,8 +142,36 @@ export type RenderResultFn = (
 	context: RenderCallContext,
 ) => Component;
 
+function activityLines(activity: ActivitySnapshot, expanded: boolean): string[] {
+	const seconds = (ms: number) => `${Math.floor(ms / 1000)}s`;
+	const lines = [
+		`${activity.phase} · ${seconds(activity.elapsedMs)} elapsed · last event ${seconds(activity.lastEventAgoMs)} ago`,
+	];
+	if (expanded) {
+		const skipped = Math.max(0, activity.entries.length - 8);
+		if (skipped) lines.push(`  … ${skipped} earlier events`);
+		for (const entry of activity.entries.slice(-8)) {
+			lines.push(`  ${seconds(entry.atMs).padStart(4)}  ${entry.text}`);
+		}
+	} else {
+		if (activity.lastAction) lines.push(`Last: ${activity.lastAction}`);
+		lines.push("Ctrl+O for activity");
+	}
+	return lines;
+}
+
 export const renderResult: RenderResultFn = (result, options, theme, context) => {
 	if (options.isPartial) {
+		const activity = result.details?.activity;
+		if (activity) {
+			return new Text(
+				activityLines(activity, options.expanded || result.details?.progressMode === "full")
+					.map((s) => theme.fg("dim", s))
+					.join("\n"),
+				0,
+				0,
+			);
+		}
 		const text = result.details?.progress ?? getResultText(result).split("\n")[0].slice(0, 120);
 		return new Text(theme.fg("dim", text), 0, 0);
 	}
@@ -168,6 +201,20 @@ export const renderResult: RenderResultFn = (result, options, theme, context) =>
 			container.addChild(new Text("", 0, 0));
 		}
 		container.addChild(new Markdown(full, 0, 0, getMarkdownTheme()));
+		if (details?.activity?.entries.length) {
+			container.addChild(new Text("", 0, 0));
+			container.addChild(new Text(theme.fg("dim", "Recent activity:"), 0, 0));
+			container.addChild(
+				new Text(
+					activityLines(details.activity, true)
+						.slice(1)
+						.map((s) => theme.fg("dim", s))
+						.join("\n"),
+					0,
+					0,
+				),
+			);
+		}
 		if (details?.logPath) {
 			container.addChild(new Text("", 0, 0));
 			container.addChild(new Text(theme.fg("dim", `log: ${details.logPath}`), 0, 0));

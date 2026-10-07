@@ -2,7 +2,7 @@
 
 > A [pi](https://pi.dev) package that adds exactly three subagent tools — `explore`, `review`, `verify` — to the coding agent.
 
-Foreman restores the three subagent patterns that justify their cost in a coding agent, and nothing else. Pi ships four direct tools (`read`, `write`, `edit`, `bash`) and deliberately omits subagents; Foreman adds back only the three that pay for themselves.
+Foreman restores the three subagent patterns that justify their cost in a coding agent, and nothing else. Pi's default direct tools are `read`, `write`, `edit`, and `bash`; Foreman adds only the three subagents that pay for themselves.
 
 | Tool | Justification |
 |---|---|
@@ -93,7 +93,7 @@ The extension is plain TypeScript that pi loads directly (pi strips types at loa
 
 ### Prerequisites
 
-- Node.js 20+ (for `node --experimental-strip-types` used by the offline tests)
+- Node.js 22.6+ (for `node --experimental-strip-types` used by the offline tests)
 - npm 9+
 - `pi` on `PATH` (required only for the model-tier acceptance suite)
 - A dev checkout with dependencies installed: `npm install`
@@ -112,7 +112,7 @@ npm pack
 # -> foreman-0.1.0.tgz
 ```
 
-The `files` field in `package.json` restricts the tarball to `src/`, `README.md`, and `NOTES.md`, so `src/child-bash.ts` and `src/prompts/*.md` — which the child processes need at runtime — are included automatically. `package.json` itself is always included.
+The `files` field in `package.json` restricts the tarball to `src/` and `README.md`, so `src/child-bash.ts`, `src/activity.ts`, `src/live-panel.ts`, and `src/prompts/*.md` are included automatically. `package.json` itself is always included. Historical design notes under `design/` are not included in the tarball.
 
 ### Publish to npm
 
@@ -192,6 +192,7 @@ Named anti-patterns (encoded in the tool descriptions): exploring a file already
   "verify":  { "model": "<mid-tier>", "maxTurns": 10, "timeoutMs": 600000 },
   "maxReturnChars": 8000,
   "progress": "line",                    // "line" (default), "full", or "off"
+  "livePanel": false,                     // opt-in overview for concurrent agents
   "logging": true,
   "disabled": [],                        // e.g. ["verify"] to turn one off
   "contextPressure": { "warnAt": 60, "strongAt": 80 },  // or false to disable entirely
@@ -222,7 +223,7 @@ Everything else Foreman writes lives under `<project>/.pi/foreman/`:
 | `.pi/foreman/logs/<session>/<tool>-<timestamp>.json` | Full child transcripts (last 50 kept per session) — for debugging, never shown to the parent. |
 | `.pi/foreman/verify.lock` | Transient verify mutex: `pid` + timestamp so two pi sessions never run concurrent builds. Removed when the call ends; stale locks are stolen. |
 
-`/foreman` prints the resolved config (including `progress`, tune, and tiers) plus the log, telemetry, and tuning paths for the current session. Consider gitignoring `.pi/foreman/`.
+`/foreman` prints the resolved config (including `progress`, `livePanel`, tune, and tiers) plus the log, telemetry, and tuning paths for the current session. Consider gitignoring `.pi/foreman/`.
 
 ---
 
@@ -232,7 +233,7 @@ Foreman registers one slash command with three modes:
 
 | Command | What it does |
 |---|---|
-| `/foreman` | Resolved config (including tune + tiers), per-tool spend this session, and the log/telemetry/tuning paths. |
+| `/foreman` | Resolved config (including `progress`, `livePanel`, tune + tiers), per-tool spend this session, and the log/telemetry/tuning paths. |
 | `/foreman stats` | Cross-session aggregates: outcome rates, retry rate, avg/median duration, avg cost and **cost per successful run**, top models, per-prompt-version breakdown, and a 7-day vs prior-30-day drift comparison (✓/✗ per tool). Append `--json` for machine-readable output. |
 | `/foreman tune` | Computes tuning recommendations from recent telemetry and writes them to `.pi/foreman/tuning.json`. Use `/foreman tune -n` (or `--dry-run`) to preview without writing; append `--json` for machine-readable output. Also prints a **model advisory** when a model costs ≥2× per success at comparable success rate (informational — never auto-applied). |
 
@@ -240,9 +241,10 @@ Foreman registers one slash command with three modes:
 
 ## Visibility & cost
 
-- Set `progress` in `.pi/foreman.json` (project) or `~/.pi/agent/foreman.json` (global): `"line"` (default) shows the latest child action, `"full"` shows a rolling feed of the last 8 actions, and `"off"` hides live updates. When enabled, the tool row starts with `→ starting …` and shows `→ waiting for child response` while the child is waiting on the model, then tool calls (`read`/`bash`) and brief output previews. This is activity metadata, not the child's private reasoning or full tool output. Pi's footer still says “Working” while the parent runs; the progress appears under the `foreman:<tool>` row. Completed calls collapse to a compact summary (expand with Ctrl+O for the full answer).
+- Set `progress` in `.pi/foreman.json` (project) or `~/.pi/agent/foreman.json` (global): `"line"` (default) keeps the running tool row compact (phase, elapsed time, time since last event, last action); press Ctrl+O to expand a bounded live timeline. `"full"` shows that timeline even when collapsed; `"off"` hides live updates. The timeline holds up to 24 recent events, displaying the latest 8; individual previews are capped at 160 characters. Observable events include tool calls, brief result previews, and streamed assistant text. Raw private reasoning and full tool output are never shown. A silent provider wait is reported honestly with an increasing timer. `→ read done` means the child **tool** finished, not the subagent: it remains in the timeline while the agent continues. Once the agent finishes, the collapsed row becomes its final summary; Ctrl+O can still show the answer and recent activity. The parent model receives only the final answer, not live activity.
+- `"livePanel": true` adds a small non-modal overview above the editor **only while two or more Foreman agents run concurrently**. Single-agent activity belongs in its own tool row; the overview shows up to three running agents and counts any others. It disappears when fewer than two remain. `livePanel` applies only to the interactive TUI.
 - Every result carries a footer such as `[explore: 4 turns, 9.8k in / 1.1k out, $0.03, 42s]`, and child usage is returned as the tool's `usage`, so pi's own `/session` totals include subagent spend.
-- Full child transcripts are written to `.pi/foreman/logs/<session>/<tool>-<timestamp>.json` (last 50 kept per session) and include `durationMs`, `promptVersion`, and the config snapshot the child ran under. The parent sees the summary; the log is for debugging why a subagent returned something odd. Consider gitignoring `.pi/foreman/`.
+- Full child transcripts are written **when each call finishes** to `.pi/foreman/logs/<session>/<tool>-<timestamp>.json` (last 50 kept per session) and include `durationMs`, `promptVersion`, and the config snapshot the child ran under. They are not a live log to tail while the child runs. The parent sees the summary; the log is for debugging why a subagent returned something odd. Consider gitignoring `.pi/foreman/`.
 
 ---
 
@@ -288,6 +290,8 @@ src/
   child-bash.ts   child-side bash gate (allowlist / watch-refusal / timeout clamp)
   runner.ts       glue: model resolution, cost accounting, footers, status bar,
                   telemetry append
+  live-panel.ts   parallel-agent overview widget (TUI only)
+  activity.ts     bounded per-agent activity timeline
   config.ts       config load (jsonc), defaults, model tier selection, explicit-field tracking
   render.ts       renderCall / renderResult for the TUI
   state.ts        per-session spend registry + verify mutex
@@ -317,19 +321,9 @@ node --experimental-strip-types test/offline.mjs   # (same thing, explicit)
 PI_MODEL=... ./test/acceptance.sh
 ```
 
-- **Offline tier** (`test/offline.mjs`) — 79 deterministic checks of the pure logic: the bash gate's structural allowlist and watch refusal, telemetry format-compliance/outcome/retry/retention/aggregation, the tuning loop (raise/revert/evidence-window/provenance/caps for both `timeoutMs` and `maxTurns`), config merge + explicit-field tracking + tier→model resolution, the TUI footer, live progress modes and result extraction, the session spend registry, the spawn truncation/output helpers, and the verify mutex (lockfile, stale-steal, live-lock, re-entry). Runs in under a second with zero spend.
-- **Model tier** (`test/acceptance.sh`) — builds fresh fixture repos in a temp dir and checks end to end: extension load and tool registration · `config.disabled` removing a tool · explore delegating once with real `file:line` references and a cost footer · correct non-delegation (in-context edit, typo, single test) · the bash gate rejecting `rm -rf`/`sed -i` while permitting `rg -n` · review finding a real bug and shipping a clean change with no nitpicks · verify distilling three failing tests in under 40 lines with no raw stack traces, and refusing watch-mode commands · context-pressure injection above threshold and absent when disabled · Ctrl-C leaving no orphans · `/foreman` totals matching footers · running with zero config.
+- **Offline tier** (`test/offline.mjs`) — 84 deterministic checks of the pure logic: the bash gate's structural allowlist and watch refusal, telemetry format-compliance/outcome/retry/retention/aggregation, the tuning loop (raise/revert/evidence-window/provenance/caps for both `timeoutMs` and `maxTurns`), config merge + explicit-field tracking + tier→model resolution, the TUI footer, live progress modes, live panel and result extraction, the session spend registry, the spawn truncation/output helpers, and the verify mutex (lockfile, stale-steal, live-lock, re-entry). Runs in under a second with zero spend.
+- **Model tier** (`test/acceptance.sh`) — builds fresh fixture repos in a temp dir and checks end to end: extension load and tool registration · `config.disabled` removing a tool · explore delegating once with real `file:line` references and a cost footer · correct non-delegation (in-context edit, typo, single test) · the bash gate rejecting `rm -rf`/`sed -i` while permitting `rg -n` · review finding a real bug and shipping a clean change with no nitpicks · verify distilling three failing tests in under 40 lines with no raw stack traces, and refusing watch-mode commands · context-pressure injection above threshold and absent when disabled · Ctrl-C leaving no orphans · `/foreman` totals matching footers · running with zero config. The live TUI timeline and parallel overview have offline tests, but no model-tier visual acceptance test yet.
 
-For quick manual checks instead:
+For a **visual** check, start interactive `pi` from this repository (or `pi -e ./src/index.ts` if Foreman is not installed), accept project trust, and run `/foreman` to confirm the resolved `progress` and `livePanel` settings. Then ask: “Use explore once to map how Foreman configuration and TUI rendering connect across source files.” Watch the tool row; Ctrl+O toggles the timeline. `-p`/JSON mode does **not** display the TUI. If you still see old live rows after a call has finished and its result is collapsed, check pi's terminal mode: fullscreen redraws the transcript, whereas regular mode uses terminal scrollback (`/settings` → `tuiMode`).
 
-```bash
-# 1. load + tools visible
-pi -e ./src/index.ts -p "List your tools."
-# 2. a subagent call
-pi -e ./src/index.ts -p "Use the explore tool to find where computeTotals is defined."
-# 3. inspect the transcript + spend
-/foreman                       # in an interactive session
-ls .pi/foreman/logs/<session>/ # full child transcripts
-```
-
-Implementation and Phase 0 discovery notes are in [`NOTES.md`](NOTES.md).
+Historical implementation and discovery notes are in `design/NOTES.md` in the source checkout (not part of the published tarball).

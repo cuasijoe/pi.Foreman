@@ -33,6 +33,8 @@ const tune = await import("../src/tune.ts");
 const config = await import("../src/config.ts");
 const state = await import("../src/state.ts");
 const render = await import("../src/render.ts");
+const { ActivityTracker } = await import("../src/activity.ts");
+const { LivePanel } = await import("../src/live-panel.ts");
 const runner = await import("../src/runner.ts");
 const spawn = await import("../src/spawn.ts");
 
@@ -625,6 +627,7 @@ console.log("config");
 		assert.equal(cfg.verify.timeoutMs, 999);
 		assert.equal(cfg.review.maxTurns, 25);
 		assert.equal(cfg.progress, "line");
+		assert.equal(cfg.livePanel, false);
 	});
 
 	test("progress mode accepts only known values and respects config layers", () => {
@@ -634,6 +637,8 @@ console.log("config");
 		assert.equal(config.mergeConfig({ progress: "line" }, full).progress, "line");
 		assert.equal(config.mergeConfig({ progress: "verbose" }, full).progress, "full");
 		assert.equal(config.mergeConfig({ progress: null }, full).progress, "full");
+		assert.equal(config.mergeConfig({ livePanel: true }, full).livePanel, true);
+		assert.equal(config.mergeConfig({ livePanel: "yes" }, full).livePanel, false);
 	});
 
 	test("explicitConfigKeys tracks only written fields", () => {
@@ -856,6 +861,63 @@ console.log("render");
 		assert.match(final.render(80).join("\n"), /Final answer/);
 		assert.doesNotMatch(final.render(80).join("\n"), /→ read/);
 	});
+	test("inline activity uses compact and expanded timelines without changing the final answer", () => {
+		const theme = { fg: (_color, text) => text, bold: (text) => text };
+		const context = { isError: false };
+		const activity = {
+			elapsedMs: 21000,
+			lastEventAgoMs: 8000,
+			phase: "Waiting for model",
+			lastAction: "read src/render.ts",
+			entries: [{ atMs: 12000, text: "read src/render.ts" }],
+		};
+		const result = {
+			content: [{ type: "text", text: "Final answer" }],
+			details: {
+				tool: "explore",
+				activity,
+				progressMode: "line",
+				turns: 1,
+				inputTokens: 0,
+				outputTokens: 0,
+				costUsd: 0,
+				stoppedBy: "complete",
+			},
+		};
+		const compact = render
+			.renderResult(result, { expanded: false, isPartial: true }, theme, context)
+			.render(120)
+			.join("\n");
+		assert.match(compact, /Waiting for model · 21s elapsed · last event 8s ago/);
+		assert.match(compact, /Last: read src\/render.ts/);
+		assert.doesNotMatch(compact, /12s  read/);
+		const expanded = render
+			.renderResult(result, { expanded: true, isPartial: true }, theme, context)
+			.render(120)
+			.join("\n");
+		assert.match(expanded, /12s  read src\/render.ts/);
+		result.details.progressMode = "full";
+		assert.match(
+			render
+				.renderResult(result, { expanded: false, isPartial: true }, theme, context)
+				.render(120)
+				.join("\n"),
+			/12s  read/,
+		);
+		const final = render
+			.renderResult(result, { expanded: false, isPartial: false }, theme, context)
+			.render(120)
+			.join("\n");
+		assert.match(final, /Final answer/);
+		assert.doesNotMatch(final, /read src\/render.ts/);
+		const expandedFinal = render
+			.renderResult(result, { expanded: true, isPartial: false }, theme, context)
+			.render(120)
+			.join("\n");
+		assert.match(expandedFinal, /Final answer/);
+		assert.match(expandedFinal, /Recent activity:/);
+		assert.match(expandedFinal, /read src\/render.ts/);
+	});
 	test("usageFooter: turns pluralization + token/cost/duration formatting", () => {
 		assert.equal(
 			render.usageFooter({
@@ -956,6 +1018,73 @@ console.log("state spend registry");
 	});
 }
 
+console.log("activity tracker");
+{
+	test("bounded timeline retains recent events, draft preview, and honest idle time", () => {
+		let now = 0;
+		const tracker = new ActivityTracker(() => now);
+		tracker.observe({ phase: "waiting" });
+		tracker.record("→ waiting for child response");
+		now = 4000;
+		tracker.observe({ phase: "running_tool", action: "read src/config.ts" });
+		tracker.record("→ read src/config.ts");
+		tracker.record("first line of result");
+		now = 9000;
+		tracker.observe({ phase: "reasoning" });
+		tracker.observe({ phase: "responding", textDelta: "Hello " });
+		tracker.observe({ phase: "responding", textDelta: "world" });
+		assert.match(tracker.snapshot().entries.at(-1).text, /Hello world/);
+		assert.equal(tracker.snapshot(21000).lastEventAgoMs, 12000);
+		assert.equal(tracker.snapshot(21000).lastAction, "read src/config.ts");
+		for (let i = 0; i < 30; i++) tracker.record(`event-${i}`);
+		assert.equal(tracker.snapshot().entries.length, 24);
+		assert.equal(tracker.snapshot().entries.at(-1).text, "event-29");
+	});
+}
+
+console.log("live panel");
+{
+	test("non-modal widget tracks concurrent agents and clears when the last ends", () => {
+		let now = 1000;
+		const calls = [];
+		const ui = { setWidget: (...args) => calls.push(args) };
+		const panel = new LivePanel(() => now);
+		const explore = panel.start(ui, "explore", "deepseek/deepseek-v4-pro");
+		explore.update({ phase: "waiting" });
+		assert.deepEqual(calls, []); // Single agent belongs in its tool row.
+		now = 6000;
+		const review = panel.start(ui, "review", "anthropic/opus");
+		review.update({ phase: "running_tool", action: "bash $ git diff" });
+		assert.equal(calls.at(-1)[0], "foreman-live");
+		assert.deepEqual(calls.at(-1)[2], { placement: "aboveEditor" });
+		assert.match(calls.at(-1)[1].join("\n"), /2 agents running/);
+		assert.match(calls.at(-1)[1].join("\n"), /explore  0:05  ·  Waiting for model/);
+		assert.match(calls.at(-1)[1].join("\n"), /review.*Running tool/);
+		assert.match(calls.at(-1)[1].join("\n"), /bash \$ git diff/);
+		explore.end();
+		assert.deepEqual(calls.at(-1), ["foreman-live", undefined]);
+		const cleared = calls.length;
+		review.end();
+		assert.equal(calls.length, cleared);
+	});
+	test("panel sanitizes tool arguments, bounds rows, and ignores updates after reset", () => {
+		const calls = [];
+		const ui = { setWidget: (...args) => calls.push(args) };
+		const panel = new LivePanel(() => 0);
+		const agents = Array.from({ length: 5 }, () => panel.start(ui, "explore", "model"));
+		agents[0].update({ phase: "running_tool", action: "read secret\n\x1b[31mcolored" });
+		const lines = calls.at(-1)[1];
+		assert.ok(lines.length <= 10);
+		assert.match(lines.join("\n"), /\+2 more running/);
+		assert.doesNotMatch(lines.join("\n"), /\x1b|\n\[31m/);
+		panel.reset();
+		const after = calls.length;
+		agents[0].update({ phase: "responding" });
+		agents.forEach((agent) => agent.end());
+		assert.equal(calls.length, after);
+	});
+}
+
 console.log("spawn helpers");
 {
 	test("truncateReturn: passthrough, truncation, UTF-8 boundary", () => {
@@ -989,6 +1118,40 @@ console.log("spawn helpers");
 		assert.equal(spawn.formatToolCallLine("bash", { command: "npm test" }), "bash $ npm test");
 		assert.equal(spawn.formatToolCallLine("read", { path: "src/a.ts" }), "read src/a.ts");
 		assert.ok(spawn.formatToolCallLine("other", { x: 1 }).startsWith("other "));
+	});
+	test("child JSON events yield only phase metadata and tool calls", () => {
+		assert.deepEqual(spawn.activityFromEvent({ type: "turn_start" }), { phase: "waiting" });
+		assert.deepEqual(
+			spawn.activityFromEvent({
+				type: "message_update",
+				assistantMessageEvent: { type: "thinking_delta", delta: "private thoughts" },
+			}),
+			{ phase: "reasoning" },
+		);
+		assert.deepEqual(
+			spawn.activityFromEvent({
+				type: "message_update",
+				assistantMessageEvent: { type: "text_delta", delta: "draft answer" },
+			}),
+			{ phase: "responding", textDelta: "draft answer" },
+		);
+		assert.deepEqual(
+			spawn.activityFromEvent({
+				type: "tool_execution_start",
+				toolName: "read",
+				args: { path: "src/config.ts" },
+			}),
+			{ phase: "running_tool", action: "read src/config.ts" },
+		);
+		assert.deepEqual(
+			spawn.activityFromEvent({
+				type: "tool_execution_end",
+				toolName: "bash",
+				isError: true,
+			}),
+			{ phase: "tool_failed" },
+		);
+		assert.equal(spawn.activityFromEvent({ type: "message_end" }), undefined);
 	});
 }
 

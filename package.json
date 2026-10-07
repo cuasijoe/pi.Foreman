@@ -5,7 +5,7 @@
   "type": "module",
   "private": true,
   "keywords": ["pi-package", "pi-extension", "subagents"],
-  "files": ["src", "README.md", "NOTES.md"],
+  "files": ["src", "README.md"],
   "pi": {
     "extensions": ["./src/index.ts"]
   },
